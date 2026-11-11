@@ -562,10 +562,10 @@ class DashboardRenderer:
         item_w = (x1 - x0) / n
         for i, h in enumerate(hourly):
             ix = x0 + item_w * (i + 0.5)
-            draw.text((ix, y0 + 2), h.hour, font=self.f_small,
+            draw.text((ix, y0 - 2), h.hour, font=self.f_small,
                       fill=GRAY_MID, anchor="mt")
-            self._draw_weather_icon(img, ix, y0 + 50, 42, h.icon_code)
-            draw.text((ix, y0 + 82), f"{h.temp}°", font=self.f_hour,
+            self._draw_weather_icon(img, ix, y0 + 40, 38, h.icon_code)
+            draw.text((ix, y0 + 62), f"{h.temp}°", font=self._bold(28),
                       fill=BLACK, anchor="mt")
 
     def _placeholder_removed(self):
@@ -609,14 +609,14 @@ class DashboardRenderer:
             for t in todos[:8]:
                 lines = self._wrap_text(draw, t.title, self.f_body,
                                         x1 - x0 - 40, max_lines=2)
-                need = 36 * len(lines) + 16
+                need = 34 * len(lines) + 16
                 # 放不下整条就停，别把字压到"已完成"那行上
                 if cy + need > limit:
                     break
                 self._checkbox(draw, x0, cy + 5, size=18)
                 for ln in lines:
                     draw.text((x0 + 36, cy), ln, font=self.f_body, fill=BLACK)
-                    cy += 36
+                    cy += 34
                 if t.due_text:
                     draw.text((x1, cy - 36), t.due_text, font=self.f_small,
                               fill=GRAY_DARK, anchor="ra")
@@ -653,7 +653,7 @@ class DashboardRenderer:
         total = 0
         for t in todos[:8]:
             lines = self._wrap_text(draw, t.title, self.f_body, wrap_w, max_lines=2)
-            total += 36 * len(lines) + 16
+            total += 34 * len(lines) + 16
         need = 54 + 22 + total + (34 if self._todo_done else 0) + 8
         return int(max(lo, min(hi, need)))
 
@@ -690,41 +690,58 @@ class DashboardRenderer:
                       font=self.f_small, fill=GRAY_DARK)
             return
 
-        inner_w, inner_h = x1 - x0, y1 - y0
+        inner_h = y1 - y0
 
-        # 立绘：宽度不超过卡片内宽的 42%，并在垂直方向居中，
-        # 免得"下面空一截"
-        m = self._mascot()
+        # 立绘顶满卡片高度，下沿贴住卡片底边
         col_x = x0
+        m = self._mascot()
         if m is not None:
-            # 立绘尽量顶满卡片高度（留 24px 呼吸），右侧剩下的宽度给数字
-            mh = min(inner_h - 24, 340)
+            mh = inner_h
             mw = int(mh * m.width / m.height)
-            mm = m.resize((mw, mh), Image.LANCZOS)
-            img.paste(mm, (x0, y0 + (inner_h - mh) // 2))
-            col_x = x0 + mw + 22
+            img.paste(m.resize((mw, mh), Image.LANCZOS), (x0, y0))
+            col_x = x0 + mw + 28
 
-        avail = x1 - col_x
-        block_h = 196
-        y = y0 + max(0, (inner_h - block_h) // 2)
+        right_w = x1 - col_x
 
-        # 窄栏里一行放不下"标签 + 数值"，改成标签在上、数值在下
-        draw.text((col_x, y), "余额", font=self.f_small, fill=GRAY_DARK)
+        # 上：余额 + 两行当日用量（左右并排，省高度）
+        draw.text((col_x, y0), "余额 BALANCE", font=self.f_tiny, fill=GRAY_DARK)
         bal = f"¥{d.balance:.2f}" if d.balance is not None else "—"
-        bf = self._bold(52)
-        if draw.textlength(bal, font=bf) > avail:
-            bf = self._bold(42)
-        draw.text((col_x, y + 24), bal, font=bf, fill=BLACK)
+        bf = self._bold(64)
+        if draw.textlength(bal, font=bf) > right_w:
+            bf = self._bold(52)
+        draw.text((col_x, y0 + 22), bal, font=bf, fill=BLACK)
 
-        y += 100
+        row_y = y0 + 106
+        half = right_w // 2
         cost = f"¥{d.today_cost:.2f}" if d.today_cost is not None else "—"
-        draw.text((col_x, y), "今日已用", font=self.f_tiny, fill=GRAY_MID)
-        draw.text((col_x, y + 22), cost, font=self.f_body_b, fill=BLACK)
-
-        y += 58
-        draw.text((col_x, y), "今日 Token", font=self.f_tiny, fill=GRAY_MID)
-        draw.text((col_x, y + 22), self._human_tokens(d.today_tokens),
+        draw.text((col_x, row_y), "今日已用", font=self.f_tiny, fill=GRAY_DARK)
+        draw.text((col_x, row_y + 22), cost, font=self.f_body_b, fill=BLACK)
+        draw.text((col_x + half, row_y), "今日 Token", font=self.f_tiny, fill=GRAY_DARK)
+        draw.text((col_x + half, row_y + 22), self._human_tokens(d.today_tokens),
                   font=self.f_body_b, fill=BLACK)
+
+        # 下：近 7 日柱状（占满右区宽度）
+        sep = row_y + 62
+        draw.line((col_x, sep, x1, sep), fill=GRAY_LIGHT, width=1)
+
+        hist = list(getattr(d, "history", []) or [])
+        if len(hist) >= 2:
+            draw.text((col_x, sep + 10), "近 7 日", font=self.f_tiny, fill=GRAY_MID)
+            top = sep + 36
+            base = y1 - 24
+            n = len(hist)
+            slot = right_w / n
+            mx = max((c for _, c in hist), default=0.0) or 1.0
+            for i, (day, c) in enumerate(hist):
+                bh = int((base - top) * (c / mx)) if c > 0 else 0
+                bx = int(col_x + i * slot + 6)
+                bw = max(10, int(slot - 16))
+                if bh > 2:
+                    fill = BLACK if i == n - 1 else GRAY_MID
+                    draw.rounded_rectangle((bx, base - bh, bx + bw, base),
+                                           radius=4, fill=fill)
+                draw.text((bx + bw // 2, base + 4), day[-2:],
+                          font=self.f_tiny, fill=GRAY_DARK, anchor="ma")
 
     def _panel_trend(self, draw, box, d):
         x0, y0, x1, y1 = self._panel_frame(draw, box, "近 7 日消耗")
@@ -823,7 +840,7 @@ class DashboardRenderer:
         y += top_h + GAP
 
         # 逐时天气
-        hourly_h = 184
+        hourly_h = 168
         self._panel_hourly_weather(draw, (x0, y, x1, y + hourly_h),
                                    snap.hourly_weather, img)
         y += hourly_h + GAP
@@ -843,9 +860,7 @@ class DashboardRenderer:
 
         # DeepSeek 整行，吃满剩余高度
         ds_h = status_top - GAP - y
-        split = x0 + int((x1 - x0) * 0.60)
-        self._panel_deepseek(draw, (x0, y, split, y + ds_h), snap.deepseek, img)
-        self._panel_trend(draw, (split + GAP, y, x1, y + ds_h), snap.deepseek)
+        self._panel_deepseek(draw, (x0, y, x1, y + ds_h), snap.deepseek, img)
 
         return self._quantize(img)
 
