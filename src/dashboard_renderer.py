@@ -355,7 +355,7 @@ class DashboardRenderer:
                                fill=fill)
         if title:
             draw.text((x0 + 26, y0 + 26), title, font=self.f_label,
-                      fill=GRAY_DARK, anchor="lm")
+                      fill=BLACK, anchor="lm")
         return (x0 + 26, y0 + 54, x1 - 26, y1 - 22)
 
     def _progress_bar(self, draw, box, ratio, fill=BLACK, back=GRAY_LIGHT,
@@ -551,8 +551,6 @@ class DashboardRenderer:
             status = "看板端待上报电量"
         else:
             status = "充电中" if charging else "未充电"
-            if snap.device.updated_at:
-                status += f" · 上报 {snap.device.updated_at:%H:%M}"
         draw.text((x0, cy), status, font=self.f_small, fill=GRAY_DARK)
 
     def _panel_hourly_weather(self, draw, box, hourly, img):
@@ -692,59 +690,101 @@ class DashboardRenderer:
                       font=self.f_small, fill=GRAY_DARK)
             return
 
-        # 左列：立绘
+        inner_w, inner_h = x1 - x0, y1 - y0
+
+        # 立绘：宽度不超过卡片内宽的 42%，并在垂直方向居中，
+        # 免得"下面空一截"
         m = self._mascot()
-        mid_x = x0
+        col_x = x0
         if m is not None:
-            mh = min(340, y1 - y0 - 6)
-            scale = mh / m.height
-            mm = m.resize((int(m.width * scale), mh), Image.LANCZOS)
-            img.paste(mm, (x0, y0))
-            mid_x = x0 + mm.width + 24
+            # 立绘尽量顶满卡片高度（留 24px 呼吸），右侧剩下的宽度给数字
+            mh = min(inner_h - 24, 340)
+            mw = int(mh * m.width / m.height)
+            mm = m.resize((mw, mh), Image.LANCZOS)
+            img.paste(mm, (x0, y0 + (inner_h - mh) // 2))
+            col_x = x0 + mw + 22
 
-        # 中列：余额 / 今日
-        bar_x = x0 + int((x1 - x0) * 0.66)
-        draw.text((mid_x, y0 + 2), "余额 BALANCE", font=self.f_tiny, fill=GRAY_MID)
+        avail = x1 - col_x
+        block_h = 196
+        y = y0 + max(0, (inner_h - block_h) // 2)
+
+        # 窄栏里一行放不下"标签 + 数值"，改成标签在上、数值在下
+        draw.text((col_x, y), "余额", font=self.f_small, fill=GRAY_DARK)
         bal = f"¥{d.balance:.2f}" if d.balance is not None else "—"
-        bf = self.f_num
-        if draw.textlength(bal, font=bf) > (bar_x - mid_x - 20):
-            bf = self._bold(48)
-        draw.text((mid_x, y0 + 26), bal, font=bf, fill=BLACK)
+        bf = self._bold(52)
+        if draw.textlength(bal, font=bf) > avail:
+            bf = self._bold(42)
+        draw.text((col_x, y + 24), bal, font=bf, fill=BLACK)
 
-        y = y0 + 108
+        y += 100
         cost = f"¥{d.today_cost:.2f}" if d.today_cost is not None else "—"
-        draw.text((mid_x, y), "今日已用", font=self.f_small, fill=GRAY_DARK)
-        draw.text((bar_x - 24, y - 4), cost, font=self.f_body_b, fill=BLACK, anchor="ra")
-        y += 38
-        draw.text((mid_x, y), "今日 Token", font=self.f_small, fill=GRAY_DARK)
-        draw.text((bar_x - 24, y - 4), self._human_tokens(d.today_tokens),
-                  font=self.f_body_b, fill=BLACK, anchor="ra")
+        draw.text((col_x, y), "今日已用", font=self.f_tiny, fill=GRAY_MID)
+        draw.text((col_x, y + 22), cost, font=self.f_body_b, fill=BLACK)
 
-        # 右列：近 7 日
-        draw.line((bar_x, y0, bar_x, y1), fill=GRAY_LIGHT, width=1)
-        hist = list(getattr(d, "history", []) or [])
-        if len(hist) >= 2:
-            bx0 = bar_x + 24
-            draw.text((bx0, y0 + 2), "近 7 日", font=self.f_tiny, fill=GRAY_MID)
-            up = d.updated_at.strftime("%H:%M") if getattr(d, "updated_at", None) else "--:--"
-            tail = f"更新 {up}" + (" · 偏旧" if getattr(d, "stale", False) else "")
-            draw.text((x1, y0 + 2), tail, font=self.f_tiny, fill=GRAY_MID, anchor="ra")
+        y += 58
+        draw.text((col_x, y), "今日 Token", font=self.f_tiny, fill=GRAY_MID)
+        draw.text((col_x, y + 22), self._human_tokens(d.today_tokens),
+                  font=self.f_body_b, fill=BLACK)
 
-            top = y0 + 34
-            base = y1 - 26
-            n = len(hist)
-            slot = (x1 - bx0) // n
-            mx = max((c for _, c in hist), default=0.0) or 1.0
-            for i, (day, c) in enumerate(hist):
-                bh = int((base - top) * (c / mx)) if c > 0 else 0
-                bx = bx0 + i * slot + 6
-                bw = max(8, slot - 16)
-                if bh > 2:
-                    fill = BLACK if i == n - 1 else GRAY_LIGHT
-                    draw.rounded_rectangle((bx, base - bh, bx + bw, base),
-                                           radius=4, fill=fill)
-                draw.text((bx + bw // 2, base + 4), day[-2:],
-                          font=self.f_tiny, fill=GRAY_DARK, anchor="ma")
+    def _panel_trend(self, draw, box, d):
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "近 7 日消耗")
+
+        hist = list(getattr(d, "history", []) or []) if d is not None else []
+        if len(hist) < 2:
+            draw.text((x0, y0 + 4), "暂无数据", font=self.f_body, fill=GRAY_LIGHT)
+            return
+
+        top = y0 + 30          # 给峰值标注留出空间
+        base = y1 - 26
+        n = len(hist)
+        slot = (x1 - x0) / n
+        mx = max((c for _, c in hist), default=0.0) or 1.0
+
+        for i, (day, c) in enumerate(hist):
+            bh = int((base - top) * (c / mx)) if c > 0 else 0
+            bx = x0 + i * slot + 6
+            bw = max(8, int(slot - 14))
+            if bh > 2:
+                fill = BLACK if i == n - 1 else GRAY_MID
+                draw.rounded_rectangle((bx, base - bh, bx + bw, base),
+                                       radius=4, fill=fill)
+            draw.text((bx + bw // 2, base + 4), day[-2:],
+                      font=self.f_tiny, fill=GRAY_DARK, anchor="ma")
+
+    def _panel_trend(self, draw, box, d):
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "近 7 日消耗")
+
+        hist = list(getattr(d, "history", []) or []) if d is not None else []
+        if len(hist) < 2:
+            draw.text((x0, y0 + 4), "暂无数据", font=self.f_body, fill=GRAY_LIGHT)
+            return
+
+        base = y1 - 26
+        top = y0 + 26
+        n = len(hist)
+        slot = (x1 - x0) / n
+        mx = max((c for _, c in hist), default=0.0) or 1.0
+
+        for i, (day, c) in enumerate(hist):
+            bh = int((base - top) * (c / mx)) if c > 0 else 0
+            bx = x0 + i * slot + 6
+            bw = max(8, int(slot - 14))
+            if bh > 2:
+                fill = BLACK if i == n - 1 else GRAY_MID
+                draw.rounded_rectangle((bx, base - bh, bx + bw, base),
+                                       radius=4, fill=fill)
+            draw.text((bx + bw // 2, base + 4), day[-2:],
+                      font=self.f_tiny, fill=GRAY_DARK, anchor="ma")
+
+        # 峰值标注：贴在最高柱的右上角，不压标题
+        peak = max(hist, key=lambda x: x[1])
+        if peak[1] > 0:
+            i = hist.index(peak)
+            bw = max(8, int(slot - 14))
+            bx = x0 + i * slot + 6 + bw + 4
+            bh = int((base - top) * (peak[1] / mx))
+            draw.text((bx, base - bh), f"¥{peak[1]:.0f}",
+                      font=self.f_tiny, fill=GRAY_DARK, anchor="lb")
 
     def _bottom_bar(self, draw, box, icons):
         x0, y0, x1, y1 = box
@@ -803,7 +843,9 @@ class DashboardRenderer:
 
         # DeepSeek 整行，吃满剩余高度
         ds_h = status_top - GAP - y
-        self._panel_deepseek(draw, (x0, y, x1, y + ds_h), snap.deepseek, img)
+        split = x0 + int((x1 - x0) * 0.60)
+        self._panel_deepseek(draw, (x0, y, split, y + ds_h), snap.deepseek, img)
+        self._panel_trend(draw, (split + GAP, y, x1, y + ds_h), snap.deepseek)
 
         return self._quantize(img)
 
