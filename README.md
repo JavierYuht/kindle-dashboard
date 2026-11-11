@@ -148,15 +148,23 @@ python tools/deploy_kindle_macos.py --host 192.168.1.50
 
 拔线后书库里点 **「看板 启动」**，10–20 秒出图。点「看板 停止」恢复原生界面。
 
-### 3. 鲸鱼娘立绘（可选）
+### 3. 鲸鱼娘立绘（已内置，可替换）
 
-立绘来自 DSH 的小鲸鱼挂件，**不随仓库分发**。本地装了插件后自行生成：
+仓库里带了一张处理好的 `assets/whale/mascot.png`（裁边 → 灰化 → 16 级 Floyd–Steinberg 抖动），开箱即用。
+
+⚠️ **这张图不受本仓库 MIT 许可覆盖**：它派生自 `dsh-whale-widget` 的 `DSniang1.png`，上游明确说明 `assets/` 不在 MIT 范围内、按 as-is 提供且不授予再许可。详见 [`assets/whale/NOTICE.md`](assets/whale/NOTICE.md)。
+
+所以要再分发 / 商用 / 公开部署前，请自行确认权利状态，或换掉它：
 
 ```bash
-python tools/make_mascot.py     # 裁边 → 灰化 → 16 级 Floyd–Steinberg 抖动
+# 方式 A：删掉，让面板退化成纯数字（不会报错）
+rm assets/whale/mascot.png
+
+# 方式 B：换自己的图，再跑一遍处理脚本（裁边 + 灰度抖动 + 16 级量化）
+python tools/make_mascot.py --src 你的图.png
 ```
 
-没生成时 DeepSeek 面板会退化成纯数字，不会报错。
+没图时 DeepSeek 面板只显示余额与柱状，布局会自动收窄。
 
 ---
 
@@ -206,7 +214,7 @@ launchctl load ~/Library/LaunchAgents/local.kindle-dashboard.plist
 - **触摸会穿透**：图只是 framebuffer 上的像素，点屏幕等于点下面那层原生 UI。想彻底点不动只能停 framework。
 - **耗电**：15 秒重绘 + 60 秒拉图，PW3 大约 0.5–1 天一充。夜间放慢可以省，但时钟会跟着停。
 - **LaunchAgent 需登录**：断电重启后没人登录，服务不会自己起来。
-- **立绘版权**：鲸鱼娘来自第三方插件，仓库不包含图片，请自行生成并遵守原项目许可。
+- **立绘版权**：内置的鲸鱼娘派生自第三方插件素材，**不适用 MIT**，随仓库 as-is 提供；再分发前请确认权利状态或替换（见 `assets/whale/NOTICE.md`）。
 
 ---
 
@@ -230,6 +238,7 @@ launchctl load ~/Library/LaunchAgents/local.kindle-dashboard.plist
 - 天气：[和风天气](https://www.qweather.com/)
 - 图标：[QWeather-Icons](https://github.com/qwd/Icons)（保留原 LICENSE）
 - 微信读书插件：[finlater/weread.koplugin](https://github.com/finlater/weread.koplugin)
+- 鲸鱼娘立绘：[MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)（素材非 MIT，见 `assets/whale/NOTICE.md`）
 
 ## License
 
