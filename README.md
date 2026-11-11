@@ -58,6 +58,48 @@ PC 负责渲染，Kindle 只负责"拉图 + 上屏"：
 
 > 越狱有风险，请先备份 `documents/`。不要在越狱完成后恢复出厂设置或升级固件。
 
+### 兼容性：不是所有 Kindle 都一样
+
+本仓库在 **PW3 / 5.15.1.1** 上跑通，脚本本身与机型无关，但**越狱方式、分辨率、能否用 Scriptlet** 都随机型和固件变化，别直接抄别人的版本号。
+
+**越狱方式（按机型 / 固件选）**
+
+| 越狱 | 支持机型 | 固件区间 |
+|---|---|---|
+| WinterBreak2 | 全系（PW ~ PW6、KT、KOA、KS、CS） | 5.6.1.1 – 5.16.3 |
+| WinterBreak | 全系 | 5.6.1.1 – 5.18.0.2 |
+| Sanctuary | PW4 / KT4 / KOA3 / PW5 / KT5 / KS / KT6 / PW6 / KS2 / CS | 5.16.4 – 5.18.3 |
+| SpringBreak | PW5 / KT5；PW4 / KT4 | 5.18.1 – 5.19.2.0.1；5.18.1 – 5.18.1.1.1 |
+| AdBreak | PW4 / KT4 / KOA3 / PW5 / KT5 / KS / KT6 / PW6 | 5.18.1 – 5.18.5.0.1 |
+| Shadow | KS / KS2 / CS / PW6 / KT6 | 5.19.4 – 5.19.6 |
+| Véra | PW5 / KT5 / KT6 / PW6 / CS / KS / KS2 | 5.17.1 – 5.20.2 |
+
+> 最稳的做法：用 [KindleModding 的 Find my Jailbreak](https://kindlemodding.org/jailbreak-wizard.html)，输入序列号前 8 位 + 当前固件，它会直接告诉你该用哪个。**已经在别人机器上成功的方案，未必适配你的固件。**
+
+**能否用 Scriptlet**
+
+`documents/` 里的 `.sh` 能被识别成"书"，靠的是 WinterBreak 系列自带的通用 hotfix（SH_Integration）：
+
+- WinterBreak / WinterBreak2 / Sanctuary 等新方案 → **直接可用**
+- 更早的越狱（LanguageBreak 时代）→ 没有 SH_Integration，得改用 **KUAL 扩展**：把 `kindle_ext/` 里的脚本放进 `extensions/kdashboard/`，再配 `menu.json`
+- 固件 ≥ 5.16.3 的机器有 Jobman，可用它托管后台进程（本仓库的 `nohup/setsid` 方案同样可行）
+
+**分辨率**
+
+当前版式按 **1072 × 1448**（PW3 / PW4）设计。换机型要改 `src/dashboard_renderer.py` 顶部的 `WIDTH` / `HEIGHT`，并按比例调整 `MARGIN` / `GAP` 与字号，否则会溢出或留白过多。
+
+| 机型 | 分辨率 |
+|---|---|
+| PW3 / PW4 / Kindle 11 (KT5) | 1072 × 1448 |
+| PW5 | 1236 × 1648 |
+| PW6（2024） | 1264 × 1680 |
+| Kindle 10 (KT4) | 600 × 800 |
+| Scribe | 1860 × 2480 |
+
+**固件升级**
+
+越狱后务必**阻断 OTA**（WinterBreak 系列会自动阻断）。任何升级前先确认目标固件仍在可越狱区间 —— 升级会清掉越狱，且**不能降级**。
+
 ---
 
 ## 快速开始
