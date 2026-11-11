@@ -852,14 +852,20 @@ class DashboardRenderer:
         self._todo_done = snap.todo_done
         todo_need = self._todo_height(draw, snap.todos, half - 2 * PAD - 40)
         row_h = max(notes_need, todo_need)
+
+        # DeepSeek 卡封顶：立绘不该一枝独秀，多出来的高度还给上面两栏
+        ds_max = 430
+        bottom_limit = self.h - MARGIN
+        ds_h = bottom_limit - GAP - (y + row_h + GAP)
+        if ds_h > ds_max:
+            row_h += ds_h - ds_max
+
         self._panel_notes(draw, (x0, y, x0 + half, y + row_h), snap.notes)
         self._panel_todo(draw, (x0 + half + GAP, y, x1, y + row_h), snap.todos)
         y += row_h + GAP
 
-        status_top = self.h - MARGIN
-
         # DeepSeek 整行，吃满剩余高度
-        ds_h = status_top - GAP - y
+        ds_h = self.h - MARGIN - GAP - y
         self._panel_deepseek(draw, (x0, y, x1, y + ds_h), snap.deepseek, img)
 
         return self._quantize(img)
