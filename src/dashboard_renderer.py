@@ -42,6 +42,7 @@ ASSET_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets"
 )
 WEATHER_ICON_DIR = os.path.join(ASSET_DIR, "weather_icons")
+MASCOT_PATH = os.path.join(ASSET_DIR, "whale", "mascot.png")
 # 旧友好的天气名 → QWeather 天气代码（和风天气 API 直接返回数字代码）
 NAME_TO_QWEATHER = {
     "sunny": "100", "clear": "100", "fine": "100",
@@ -49,14 +50,22 @@ NAME_TO_QWEATHER = {
     "cloudy": "101", "overcast": "104",
 }
 
-MARGIN = 32
-GAP = 16
-PANEL_BORDER = 4
-TITLE_H = 34
+MARGIN = 44
+GAP = 22
+PANEL_BORDER = 2
+TITLE_H = 44
+PAD = 18
 
+# 每项为 (粗体, 常规)；元素可以是路径，或 (路径, TTC 索引)
 FONT_CANDIDATES = [
     ("C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/msyh.ttc"),   # 微软雅黑
     ("C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/simhei.ttf"), # 黑体
+    # macOS：冬青黑体 W6(粗) / W3(常规)，同文件不同 face
+    (("/System/Library/Fonts/Hiragino Sans GB.ttc", 2),
+     ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0)),
+    # macOS 备选：宋体-简 粗体 / 常规体
+    (("/System/Library/Fonts/Supplemental/Songti.ttc", 1),
+     ("/System/Library/Fonts/Supplemental/Songti.ttc", 6)),
 ]
 
 
@@ -157,7 +166,10 @@ class Snapshot:
     make_summary: List[str] = field(default_factory=list)  # 今日日记「搞点什么」区块概要
     sys_status: List[SysStatusItem] = field(default_factory=list)
     tokens: List[TokenUsage] = field(default_factory=list)
+    # DeepSeek 用量（collectors.whale_usage.DeepSeekUsage，鸭子类型，避免渲染器反向依赖采集器）
+    deepseek: object = None
     todos: List[Todo] = field(default_factory=list)
+    todo_done: int = 0
     bottom_icons: List[BottomIcon] = field(default_factory=list)
     # 旧字段保留，避免外部引用报错
     intervention: Optional[Intervention] = None
@@ -183,22 +195,31 @@ class DashboardRenderer:
 
         # 天气图标精灵图缓存
         self._sprite_cache: dict = {}
+        # 鲸鱼娘立绘缓存（None=未加载，False=素材缺失）
+        self._mascot_cache = None
 
     # ---- 字体 ----
     def _fonts(self):
+        def spec(p):
+            return (p, 0) if isinstance(p, str) else p
+
         bold_path = regular_path = None
         for b, r in FONT_CANDIDATES:
-            if os.path.exists(b) and os.path.exists(r):
+            b, r = spec(b), spec(r)
+            if os.path.exists(b[0]) and os.path.exists(r[0]):
                 bold_path, regular_path = b, r
                 break
         if bold_path is None:
-            raise RuntimeError("未找到中文字体（需要 msyh.ttc 或 simhei.ttf）")
+            raise RuntimeError("未找到中文字体（msyh/simhei 或 macOS 冬青黑体）")
+
+        self._bold_spec = bold_path
 
         def mk(size):
-            return ImageFont.truetype(regular_path, size)
+            return ImageFont.truetype(regular_path[0], size,
+                                     index=regular_path[1])
 
         def mkb(size):
-            return ImageFont.truetype(bold_path, size)
+            return ImageFont.truetype(bold_path[0], size, index=bold_path[1])
 
         self.f_title = mkb(20)           # 模块标题
         self.f_code = mkb(18)            # 编号标签
@@ -215,8 +236,18 @@ class DashboardRenderer:
         self.f_small = mk(22)            # 小字
         self.f_tiny = mk(20)             # 极小字
         self.f_icon = mk(20)             # 底部图标文字
+        self.f_label = mk(21)            # 模块名（常规字重，安静）
+        self.f_hero = mkb(94)            # 时钟 / 电量
+        self.f_huge = mkb(112)           # 温度
+        self.f_num = mkb(62)             # DeepSeek 余额
+        self.f_hour = mkb(30)            # 逐时温度
+        self.f_tag = mkb(16)             # 模块编号牌
 
     # ---- 工具 ----
+    def _bold(self, size):
+        return ImageFont.truetype(self._bold_spec[0], size,
+                                  index=self._bold_spec[1])
+
     def _fit(self, draw, text, font, max_w):
         if not text:
             return ""
@@ -243,7 +274,7 @@ class DashboardRenderer:
 
         # 拆分为最小排版单元：单个 CJK 字符（含中文标点），或一段连续非 CJK 文本
         tokens = re.findall(
-            r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]|[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+",
+            r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]|\s+|[^\s\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+",
             text)
 
         lines = []
@@ -277,7 +308,7 @@ class DashboardRenderer:
 
             # 正常换行
             if cur:
-                lines.append(cur)
+                lines.append(cur.rstrip())
             cur = tok
             if len(lines) >= max_lines - 1:
                 # 已到最后一行允许空间，剩余内容截断加省略号
@@ -317,46 +348,15 @@ class DashboardRenderer:
     def _quantize(self, img: Image.Image) -> Image.Image:
         return img.point(self._lut)
 
-    def _panel_frame(self, draw, box, title, code="", fill=WHITE,
-                     border=BLACK, title_fill=GRAY_FAINT):
-        """画带标题条的模块外框。"""
+    def _panel_frame(self, draw, box, title="", tag="", right="", fill=WHITE):
+        """日系卡片：圆角 + 1px 浅灰描边，标题只做安静的左上角注记。"""
         x0, y0, x1, y1 = box
-        # 主框
-        draw.rectangle(box, outline=border, width=PANEL_BORDER, fill=fill)
-        # 标题条
-        title_y1 = y0 + TITLE_H
-        draw.rectangle((x0 + PANEL_BORDER, y0 + PANEL_BORDER,
-                        x1 - PANEL_BORDER, title_y1),
-                       fill=title_fill)
-        draw.line((x0 + PANEL_BORDER, title_y1,
-                   x1 - PANEL_BORDER, title_y1),
-                  fill=border, width=2)
-
-        # 编号标签（左侧斜切风格块）
-        tag_w = 72 if code else 0
-        if code:
-            # 画小三角装饰
-            draw.polygon([(x0 + PANEL_BORDER, y0 + PANEL_BORDER),
-                          (x0 + PANEL_BORDER + 10, y0 + PANEL_BORDER),
-                          (x0 + PANEL_BORDER, y0 + PANEL_BORDER + 10)],
-                         fill=GRAY_DARK)
-            draw.text((x0 + PANEL_BORDER + 12, (y0 + title_y1) // 2),
-                      code, font=self.f_code, fill=INK, anchor="lm")
-
-        # 标题
-        title_x = x0 + PANEL_BORDER + (tag_w if code else 14)
-        draw.text((title_x, (y0 + title_y1) // 2), title,
-                  font=self.f_title, fill=BLACK, anchor="lm")
-
-        # 右侧装饰斜线
-        for dx in (12, 20):
-            draw.line((x1 - PANEL_BORDER - dx, y0 + PANEL_BORDER + 6,
-                       x1 - PANEL_BORDER - dx + 8, y0 + PANEL_BORDER + 6),
-                      fill=GRAY_DARK, width=2)
-
-        # 返回内容区域
-        return (x0 + PANEL_BORDER + 10, title_y1 + 8,
-                x1 - PANEL_BORDER - 10, y1 - PANEL_BORDER - 8)
+        draw.rounded_rectangle(box, radius=18, outline=GRAY_MID, width=2,
+                               fill=fill)
+        if title:
+            draw.text((x0 + 26, y0 + 26), title, font=self.f_label,
+                      fill=GRAY_DARK, anchor="lm")
+        return (x0 + 26, y0 + 54, x1 - 26, y1 - 22)
 
     def _progress_bar(self, draw, box, ratio, fill=BLACK, back=GRAY_LIGHT,
                       border=BLACK, height=22):
@@ -394,8 +394,8 @@ class DashboardRenderer:
 
     def _checkbox(self, draw, x, y, size=22, checked=False):
         """方框复选框。"""
-        draw.rectangle((x, y, x + size, y + size), outline=BLACK, width=2,
-                       fill=WHITE)
+        draw.rounded_rectangle((x, y, x + size, y + size), radius=4,
+                               outline=GRAY_DARK, width=2, fill=WHITE)
         if checked:
             # 画对勾
             draw.line([(x + 4, y + size // 2), (x + size // 3, y + size - 4),
@@ -469,254 +469,282 @@ class DashboardRenderer:
             draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=BLACK)
 
     # ---- 各区块 ----
+    def _soft_bar(self, draw, box, ratio, height=12, track=GRAY_LIGHT,
+                  fill=BLACK, radius=6):
+        """圆角细进度条，替代原来的格子条。"""
+        x0, y0, x1, y1 = box
+        ratio = max(0.0, min(1.0, ratio))
+        draw.rounded_rectangle((x0, y0, x1, y0 + height), radius=radius,
+                               fill=track)
+        w = int((x1 - x0) * ratio)
+        if w > height:
+            draw.rounded_rectangle((x0, y0, x0 + w, y0 + height),
+                                   radius=radius, fill=fill)
+
     def _panel_location(self, draw, box, weather, img):
-        cx = self._panel_frame(draw, box, "LOCATION", "L-01")
-        x0, y0, x1, y1 = cx
-        cxp = (x0 + x1) // 2  # 水平中心
+        x0, y0, x1, y1 = self._panel_frame(
+            draw, box, weather.location or "位置")
+        cxp = (x0 + x1) // 2
+        avail = x1 - x0
 
-        # 位置（居中）
-        loc = self._fit(draw, weather.location, self.f_body_b, x1 - x0)
-        lw = draw.textlength(loc, font=self.f_body_b)
-        draw.text((cxp - lw / 2, y0 + 14), loc, font=self.f_body_b, fill=BLACK)
-
-        # 天气图标 + 温度（居中一排，整体稍下移让布局更居中）
         t = "—" if weather.temp_now is None else f"{weather.temp_now}°"
-        tw = draw.textlength(t, font=self.f_temp_big)
-        icon_size = 46
-        gap = 14
-        total = icon_size + gap + tw
-        start_x = cxp - total // 2
-        self._draw_weather_icon(img, start_x + icon_size // 2, y0 + 100,
-                               icon_size, weather.icon_code or "100")
-        draw.text((start_x + icon_size + gap, y0 + 100), t,
-                  font=self.f_temp_big, fill=BLACK, anchor="lm")
+        icon_size, gap = 56, 12
+        f = self.f_huge
+        for size in (108, 96, 84, 72):
+            f = self._bold(size)
+            if icon_size + gap + draw.textlength(t, font=f) <= avail:
+                break
+        tw = draw.textlength(t, font=f)
 
-        # 天气文字（居中，上移靠近图标/温度行）
-        sub = weather.text
+        row_cy = y0 + 88
+        start = cxp - (icon_size + gap + tw) / 2
+        self._draw_weather_icon(img, start + icon_size / 2, row_cy,
+                                icon_size, weather.icon_code or "100")
+        draw.text((start + icon_size + gap, row_cy), t, font=f,
+                  fill=BLACK, anchor="lm")
+
+        sub = weather.text or ""
         if weather.temp_high is not None and weather.temp_low is not None:
-            sub = f"{weather.text} {weather.temp_low}°/{weather.temp_high}°"
-        sub = self._fit(draw, sub, self.f_weather, x1 - x0)
-        sw = draw.textlength(sub, font=self.f_weather)
-        draw.text((cxp - sw / 2, y0 + 150), sub, font=self.f_weather,
-                  fill=GRAY_DARK)
+            sub = f"{sub}  {weather.temp_low}° / {weather.temp_high}°"
+        sub = self._fit(draw, sub.strip(), self.f_weather, avail)
+        draw.text((cxp, y1 - 4), sub, font=self.f_weather,
+                  fill=GRAY_DARK, anchor="mb")
 
     def _panel_main_display(self, draw, box, snap):
-        cx = self._panel_frame(draw, box, "MAIN DISPLAY", "M-01")
-        x0, y0, x1, y1 = cx
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "当前时间")
+        lu = snap.now
+        ts = lu.strftime("%H:%M")
+        f = self.f_hero
+        if draw.textlength(ts, font=f) > (x1 - x0) + 6:
+            f = self._bold(82)
+        draw.text((x0 - 3, y0 + 22), ts, font=f, fill=BLACK)
 
-        # 标签行：最近更新（取代原实时钟）
-        draw.text((x0, y0 + 8), "最近更新", font=self.f_body_b, fill=GRAY_DARK)
-        lb_w = draw.textlength("最近更新", font=self.f_body_b)
-        draw.text((x0 + lb_w + 12, y0 + 12), "LAST SYNC",
-                  font=self.f_tiny, fill=GRAY_LIGHT)
-
-        # 大号时间：数据最后刷新时刻（非实时钟）
-        lu = snap.last_updated or snap.now
-        ts = lu.strftime("%H:%M:%S")
-        draw.text((x0, y0 + 86), ts, font=self.f_clock, fill=BLACK, anchor="lm")
-
-        # 分隔线（上移，给下方文字留余量）
-        sep_y = y0 + 124
-        draw.line((x0, sep_y, x1, sep_y), fill=GRAY_DARK, width=2)
-
-        # 下方：日期 + 数据源
-        cy = sep_y + 14
         week = "一二三四五六日"[lu.weekday()]
-        date_str = f"{lu.year}-{lu.month:02d}-{lu.day:02d} 周{week}"
-        draw.text((x0, cy), date_str, font=self.f_small, fill=GRAY_DARK)
-        cy += 30
-        src = "数据源: PC · 在线" if snap.device.pc_online else "数据源: 缓存/离线"
-        draw.text((x0, cy), src, font=self.f_tiny, fill=GRAY_LIGHT)
+        draw.text((x0, y0 + 152), f"{lu.month}月{lu.day}日",
+                  font=self.f_body, fill=BLACK)
+        # 星期跟日期同一行右侧，省一行高度
+        draw.text((x1, y0 + 152), f"周{week}", font=self.f_body,
+                  fill=GRAY_DARK, anchor="ra")
+
+        on = snap.device.pc_online
+        cy = y0 + 202
+        draw.ellipse((x0, cy - 6, x0 + 12, cy + 6), fill=BLACK if on else WHITE,
+                     outline=BLACK, width=2)
+        draw.text((x0 + 22, cy), "PC 在线" if on else "离线缓存",
+                  font=self.f_small, fill=GRAY_DARK, anchor="lm")
 
     def _panel_sys_status(self, draw, box, snap):
-        cx = self._panel_frame(draw, box, "SYS STATUS", "S-01")
-        x0, y0, x1, y1 = cx
-
-        # 标签行：KINDLE 电量
-        draw.text((x0, y0 + 8), "KINDLE 电量", font=self.f_body_b, fill=GRAY_DARK)
-        lb_w = draw.textlength("KINDLE 电量", font=self.f_body_b)
-        draw.text((x0 + lb_w + 12, y0 + 12), "BATTERY",
-                  font=self.f_tiny, fill=GRAY_LIGHT)
-
-        # 大号百分比
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "KINDLE 电量")
         batt = snap.device.kindle_battery
         charging = snap.device.kindle_charging
-        if batt is None:
-            big = "—"
-            ratio = 0.0
-        else:
-            big = f"{int(batt)}%"
-            ratio = max(0.0, min(1.0, batt / 100.0))
-        draw.text((x0, y0 + 86), big, font=self.f_clock, fill=BLACK, anchor="lm")
 
-        # 分隔线 + 电量条（横线整体上一移，给状态行留余量）
-        sep_y = y0 + 124
-        draw.line((x0, sep_y, x1, sep_y), fill=GRAY_DARK, width=2)
-        bar_y = sep_y + 16
-        self._segmented_bar(draw, (x0, bar_y, x1, bar_y), ratio, n=20, cell_h=20)
+        big = "—" if batt is None else f"{int(batt)}%"
+        ratio = 0.0 if batt is None else max(0.0, min(1.0, batt / 100.0))
+        draw.text((x0 - 3, y0 + 30), big, font=self.f_hero, fill=BLACK)
 
-        # 状态行：充电状态 + 最近上报时刻
-        cy = bar_y + 30
+        bar_y = y0 + 152
+        self._segmented_bar(draw, (x0, bar_y, x1, bar_y), ratio,
+                            n=18, gap=3, cell_h=18)
+
+        cy = bar_y + 40
         if batt is None:
             status = "看板端待上报电量"
         else:
             status = "充电中" if charging else "未充电"
             if snap.device.updated_at:
-                status += f" · 上报 {snap.device.updated_at:%H:%M:%S}"
-            else:
-                status += " · 已上报"
+                status += f" · 上报 {snap.device.updated_at:%H:%M}"
         draw.text((x0, cy), status, font=self.f_small, fill=GRAY_DARK)
 
     def _panel_hourly_weather(self, draw, box, hourly, img):
-        cx = self._panel_frame(draw, box, "24H WEATHER SCAN", "W-01",
-                               title_fill=GRAY_FAINT)
-        x0, y0, x1, y1 = cx
-
-        # 右侧 NEXT 6H，放在标题条内右侧；向左避让装饰斜线，避免 H 被遮挡
-        draw.text((box[2] - PANEL_BORDER - 36, box[1] + TITLE_H // 2),
-                  "NEXT 6H", font=self.f_small, fill=GRAY_DARK,
-                  anchor="rm")
-
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "6 小时预报")
         if not hourly:
             return
 
         n = len(hourly)
-        item_w = (x1 - x0) // n
-        icon_size = 40
+        item_w = (x1 - x0) / n
         for i, h in enumerate(hourly):
-            ix = x0 + i * item_w + item_w // 2
-            # 时间/图标/温度整体下移，在面板内稍微居中
-            draw.text((ix, y0 + 16), h.hour, font=self.f_small, fill=GRAY_DARK,
-                      anchor="mt")
-            # 图标（中部居中）
-            self._draw_weather_icon(img, ix, y0 + 66, icon_size, h.icon_code)
-            # 温度（底部居中）
-            draw.text((ix, y0 + 108), f"{h.temp}°", font=self.f_temp,
-                      fill=BLACK, anchor="mm")
+            ix = x0 + item_w * (i + 0.5)
+            draw.text((ix, y0 + 2), h.hour, font=self.f_small,
+                      fill=GRAY_MID, anchor="mt")
+            self._draw_weather_icon(img, ix, y0 + 50, 42, h.icon_code)
+            draw.text((ix, y0 + 82), f"{h.temp}°", font=self.f_hour,
+                      fill=BLACK, anchor="mt")
 
-    def _panel_calendar(self, draw, box, snap):
-        # 框架和「搞点什么」标题照画；空内容时不显示「今日无安排」占位文字。
-        cx = self._panel_frame(draw, box, "搞点什么", "C-02")
-        x0, y0, x1, y1 = cx
-
-        # 内容来自日记「🛠️ 搞点什么」区块的『概要』：摘要文字，非待办清单
-        lines = snap.make_summary or []
-        if not lines:
-            return
-
-        cy = y0 + 10
-        self._draw_bulleted_items(draw, lines[:3], x0, y0, x1, y1, cy,
-                                  font=self.f_body, max_lines=4, line_h=32,
-                                  indent=20, dot_r=3, gap=6)
+    def _placeholder_removed(self):
+        pass
 
     def _panel_notes(self, draw, box, notes):
-        # 框架和 NOTES 标题照画；空内容时不显示「今日无笔记」占位文字。
-        cx = self._panel_frame(draw, box, "NOTES", "N-02")
-        x0, y0, x1, y1 = cx
-        cy = y0 + 8
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "笔记")
         if not notes:
+            draw.text((x0, y0 + 4), "暂无内容", font=self.f_body, fill=GRAY_LIGHT)
             return
-        # 每条自动换行（不截断），首行带项目符号
-        self._draw_bulleted_items(draw, notes[:3], x0, y0, x1, y1, cy,
-                                  font=self.f_body, max_lines=4, line_h=30,
-                                  indent=20, dot_r=3, gap=4)
+
+        # 先排好行，再整体垂直居中，避免只有一条时孤零零贴在顶上
+        blocks = []
+        for note in notes[:4]:
+            lines = self._wrap_text(draw, note, self.f_body, x1 - x0 - 24,
+                                    max_lines=3)
+            if lines:
+                blocks.append(lines)
+
+        lh, block_gap = 42, 16
+        total = sum(lh * len(b) for b in blocks) + block_gap * (len(blocks) - 1)
+        cy = y0
+
+        for lines in blocks:
+            # 一条备忘只给一个圆点，别每换一行就补一个
+            draw.ellipse((x0, cy + 16, x0 + 8, cy + 24), fill=GRAY_DARK)
+            for ln in lines:
+                draw.text((x0 + 22, cy), ln, font=self.f_body, fill=BLACK)
+                cy += lh
+            cy += block_gap
 
     def _panel_todo(self, draw, box, todos):
-        # 框架和 TO DO QUEUE 标题照画；空内容时不显示任何占位文字。
-        cx = self._panel_frame(draw, box, "TO DO QUEUE", "O-04")
-        x0, y0, x1, y1 = cx
-        cy = y0 + 14
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "待办")
+
         if not todos:
-            return
-        box_size = 22
-        text_x = x0 + 32
-        box_size = 22
-        text_x = x0 + 32
-        line_h = 32
-        for t in todos[:4]:
-            if cy > y1 - 30:
-                break
-            first_cy = cy
-
-            # 右侧标签（优先级/截止）的实际宽度
-            right = " ".join(x for x in (t.priority, t.due_text) if x)
-            label_w = int(draw.textlength(right, font=self.f_small)) if right else 0
-
-            # 文字可用宽度：没标签时尽量用满整栏；有标签时只避让标签宽度 + 间距
-            wrap_w = (x1 - text_x) - (label_w + 12 if right else 0)
-
-            # 自动换行，避免长标题超出边框
-            wrapped = self._wrap_text(draw, t.title, self.f_body,
-                                      wrap_w, max_lines=3)
-            if not wrapped:
-                wrapped = [""]
-
-            # 方框与首行文字垂直居中：行高 32，方框 22 → 下移 5px
-            box_y = first_cy + (line_h - box_size) // 2
-            self._checkbox(draw, x0, box_y, size=box_size,
-                           checked=t.overdue)
-
-            for ln in wrapped:
-                if cy > y1 - 24:
+            draw.text((x0, y0 + 4), "没有待办", font=self.f_body, fill=GRAY_LIGHT)
+        else:
+            done_rows = getattr(self, "_todo_done", 0)
+            limit = y1 - (34 if done_rows else 6)
+            cy = y0 + 4
+            for t in todos[:8]:
+                lines = self._wrap_text(draw, t.title, self.f_body,
+                                        x1 - x0 - 40, max_lines=2)
+                need = 36 * len(lines) + 16
+                # 放不下整条就停，别把字压到"已完成"那行上
+                if cy + need > limit:
                     break
-                draw.text((text_x, cy), ln, font=self.f_body, fill=BLACK)
-                cy += line_h
-
-            # 右侧标签固定在首行右侧，与方框垂直居中
-            if right:
-                label_y = box_y + box_size // 2
-                draw.text((x1, label_y), right, font=self.f_small,
-                          fill=GRAY_DARK, anchor="ra")
-            cy += 4
-
-    def _panel_tokens(self, draw, box, tokens):
-        cx = self._panel_frame(draw, box, "用量 USAGE", "R-02")
-        x0, y0, x1, y1 = cx
-        cy = y0 + 16
-        for tk in tokens[:4]:
-            if cy > y1 - 80:
-                break
-            # 名称
-            draw.text((x0, cy), tk.name, font=self.f_body_b, fill=BLACK)
-            # 右侧主状态：status 与 detail 合并到同一行（如「剩96%·5h窗口」）
-            right_text = (f"{tk.status}·{tk.detail}"
-                          if (tk.status and tk.detail) else (tk.status or tk.detail or "—"))
-            draw.text((x1, cy - 2), right_text, font=self.f_body,
-                      fill=BLACK, anchor="ra")
-
-            # 主条（5h / 主窗口）：与上方文字拉开间距，避免字贴条
-            bar_y = cy + 36
-            self._segmented_bar(draw, (x0, bar_y, x1, bar_y), tk.usage_ratio)
-
-            # 进度条下方小字补充（如 累计88.0M · 约X后重置）
-            sub = bar_y + 30
-            if tk.note:
-                draw.text((x1, sub), tk.note, font=self.f_small,
-                          fill=GRAY_DARK, anchor="ra")
-                sub += 30
-
-            # 周窗口子行：同一 Codex 行内，不另起名称；右侧状态优先取
-            # weekly_status（如「额度未知」），缺省再拼 weekly_remaining。
-            # 触发条件：weekly_ratio>0（正常数据）或 weekly_status 非空（兜底显示）。
-            if tk.weekly_ratio or tk.weekly_status:
-                if tk.weekly_status:
-                    wk_status = tk.weekly_status
-                else:
-                    wk_status = (f"剩{tk.weekly_remaining}%" if tk.weekly_remaining else "—")
-                wk_status += "·周窗口"
-                draw.text((x1, sub), wk_status, font=self.f_body,
-                          fill=BLACK, anchor="ra")
-                # 兜底场景（额度未知）下进度条占位 0；正常场景按真实比例
-                bar_ratio = tk.weekly_ratio if tk.weekly_ratio else 0.0
-                wbar_y = sub + 36
-                self._segmented_bar(draw, (x0, wbar_y, x1, wbar_y), bar_ratio)
-                sub = wbar_y + 30
-                if tk.weekly_reset:
-                    draw.text((x1, sub), tk.weekly_reset, font=self.f_small,
+                self._checkbox(draw, x0, cy + 5, size=18)
+                for ln in lines:
+                    draw.text((x0 + 36, cy), ln, font=self.f_body, fill=BLACK)
+                    cy += 36
+                if t.due_text:
+                    draw.text((x1, cy - 36), t.due_text, font=self.f_small,
                               fill=GRAY_DARK, anchor="ra")
-                    sub += 30
+                cy += 16
 
-            cy = sub + 26
+        done = getattr(self, "_todo_done", 0)
+        if done:
+            draw.text((x0, y1 - 12), f"已完成 {done} 项", font=self.f_tiny,
+                      fill=GRAY_MID, anchor="lm")
+
+    def _placeholder_removed(self):
+        pass
+
+    def _mascot(self):
+        if self._mascot_cache is None:
+            img = False
+            if os.path.exists(MASCOT_PATH):
+                img = Image.open(MASCOT_PATH).convert("L")
+            self._mascot_cache = img
+        return self._mascot_cache or None
+
+    @staticmethod
+    def _human_tokens(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1000:.0f}K"
+        return str(n)
+
+    def _todo_height(self, draw, todos, wrap_w, lo=222, hi=360):
+        """待办面板高度：按真实换行行数算，长条目不会把 footer 挤掉。"""
+        if not todos:
+            return lo
+        total = 0
+        for t in todos[:8]:
+            lines = self._wrap_text(draw, t.title, self.f_body, wrap_w, max_lines=2)
+            total += 36 * len(lines) + 16
+        need = 54 + 22 + total + (34 if self._todo_done else 0) + 8
+        return int(max(lo, min(hi, need)))
+
+    def _notes_height(self, draw, notes, wrap_w, lo=136, hi=320):
+        """按实际行数算笔记面板高度：内容少就是一条窄带，内容多才撑高。"""
+        if not notes:
+            return lo
+        total = 0
+        for note in notes[:4]:
+            lines = self._wrap_text(draw, note, self.f_body, wrap_w, max_lines=3)
+            if lines:
+                total += 42 * len(lines) + 16
+        return int(max(lo, min(hi, total + 26)))
+
+    def _status_strip(self, draw, box, snap):
+        """底部只留一行安静的注记，不做状态栏。"""
+        x0, y0, x1, y1 = box
+        batt = snap.device.kindle_battery
+        parts = ["在线" if snap.device.pc_online else "离线"]
+        if batt is not None:
+            parts.append(f"{int(batt)}%")
+        if snap.last_updated:
+            parts.append(f"同步 {snap.last_updated:%H:%M}")
+        text = "   ·   ".join(parts)
+        draw.text(((x0 + x1) / 2, (y0 + y1) / 2), text, font=self.f_small,
+                  fill=GRAY_MID, anchor="mm")
+
+    def _panel_deepseek(self, draw, box, d, img):
+        x0, y0, x1, y1 = self._panel_frame(draw, box, "DeepSeek")
+
+        if d is None or not getattr(d, "available", False):
+            draw.text((x0, y0 + 4), "小鲸鱼账本未就绪", font=self.f_body, fill=BLACK)
+            draw.text((x0, y0 + 44), "打开一次 DSH 界面即会生成账本",
+                      font=self.f_small, fill=GRAY_DARK)
+            return
+
+        # 左列：立绘
+        m = self._mascot()
+        mid_x = x0
+        if m is not None:
+            mh = min(340, y1 - y0 - 6)
+            scale = mh / m.height
+            mm = m.resize((int(m.width * scale), mh), Image.LANCZOS)
+            img.paste(mm, (x0, y0))
+            mid_x = x0 + mm.width + 24
+
+        # 中列：余额 / 今日
+        bar_x = x0 + int((x1 - x0) * 0.66)
+        draw.text((mid_x, y0 + 2), "余额 BALANCE", font=self.f_tiny, fill=GRAY_MID)
+        bal = f"¥{d.balance:.2f}" if d.balance is not None else "—"
+        bf = self.f_num
+        if draw.textlength(bal, font=bf) > (bar_x - mid_x - 20):
+            bf = self._bold(48)
+        draw.text((mid_x, y0 + 26), bal, font=bf, fill=BLACK)
+
+        y = y0 + 108
+        cost = f"¥{d.today_cost:.2f}" if d.today_cost is not None else "—"
+        draw.text((mid_x, y), "今日已用", font=self.f_small, fill=GRAY_DARK)
+        draw.text((bar_x - 24, y - 4), cost, font=self.f_body_b, fill=BLACK, anchor="ra")
+        y += 38
+        draw.text((mid_x, y), "今日 Token", font=self.f_small, fill=GRAY_DARK)
+        draw.text((bar_x - 24, y - 4), self._human_tokens(d.today_tokens),
+                  font=self.f_body_b, fill=BLACK, anchor="ra")
+
+        # 右列：近 7 日
+        draw.line((bar_x, y0, bar_x, y1), fill=GRAY_LIGHT, width=1)
+        hist = list(getattr(d, "history", []) or [])
+        if len(hist) >= 2:
+            bx0 = bar_x + 24
+            draw.text((bx0, y0 + 2), "近 7 日", font=self.f_tiny, fill=GRAY_MID)
+            up = d.updated_at.strftime("%H:%M") if getattr(d, "updated_at", None) else "--:--"
+            tail = f"更新 {up}" + (" · 偏旧" if getattr(d, "stale", False) else "")
+            draw.text((x1, y0 + 2), tail, font=self.f_tiny, fill=GRAY_MID, anchor="ra")
+
+            top = y0 + 34
+            base = y1 - 26
+            n = len(hist)
+            slot = (x1 - bx0) // n
+            mx = max((c for _, c in hist), default=0.0) or 1.0
+            for i, (day, c) in enumerate(hist):
+                bh = int((base - top) * (c / mx)) if c > 0 else 0
+                bx = bx0 + i * slot + 6
+                bw = max(8, slot - 16)
+                if bh > 2:
+                    fill = BLACK if i == n - 1 else GRAY_LIGHT
+                    draw.rounded_rectangle((bx, base - bh, bx + bw, base),
+                                           radius=4, fill=fill)
+                draw.text((bx + bw // 2, base + 4), day[-2:],
+                          font=self.f_tiny, fill=GRAY_DARK, anchor="ma")
 
     def _bottom_bar(self, draw, box, icons):
         x0, y0, x1, y1 = box
@@ -740,51 +768,42 @@ class DashboardRenderer:
         img = Image.new("L", (self.w, self.h), WHITE)
         draw = ImageDraw.Draw(img)
 
-        x0 = MARGIN
-        x1 = self.w - MARGIN
+        x0, x1 = MARGIN, self.w - MARGIN
         y = MARGIN
 
-        # 顶部三模块
-        top_h = 260
+        # 顶部三栏：等宽（照 GitHub 项目的三栏比例）
+        top_h = 286
         col_w = (x1 - x0 - GAP * 2) // 3
         self._panel_location(draw, (x0, y, x0 + col_w, y + top_h),
                              snap.weather, img)
-        self._panel_main_display(draw,
-                                 (x0 + col_w + GAP, y,
-                                  x0 + 2 * col_w + GAP, y + top_h),
-                                 snap)
-        self._panel_sys_status(draw,
-                               (x0 + 2 * (col_w + GAP), y, x1, y + top_h),
+        self._panel_main_display(draw, (x0 + col_w + GAP, y,
+                                        x0 + 2 * col_w + GAP, y + top_h), snap)
+        self._panel_sys_status(draw, (x0 + 2 * (col_w + GAP), y, x1, y + top_h),
                                snap)
         y += top_h + GAP
 
-        # 24H 天气
-        weather_h = 190
-        self._panel_hourly_weather(draw, (x0, y, x1, y + weather_h),
-                                    snap.hourly_weather, img)
-        y += weather_h + GAP
+        # 逐时天气
+        hourly_h = 184
+        self._panel_hourly_weather(draw, (x0, y, x1, y + hourly_h),
+                                   snap.hourly_weather, img)
+        y += hourly_h + GAP
 
-        # 第三行：日历 + 笔记
-        row3_h = 350
-        mid = (x0 + x1 - GAP) // 2
-        self._panel_calendar(draw, (x0, y, mid, y + row3_h), snap)
-        self._panel_notes(draw, (mid + GAP, y, x1, y + row3_h), snap.notes)
-        y += row3_h + GAP
+        # 笔记 + 待办：横向并列
+        half = (x1 - x0 - GAP) // 2
+        wrap_w = half - 2 * PAD - 24
+        notes_need = self._notes_height(draw, snap.notes, wrap_w, lo=222, hi=322)
+        self._todo_done = snap.todo_done
+        todo_need = self._todo_height(draw, snap.todos, half - 2 * PAD - 40)
+        row_h = max(notes_need, todo_need)
+        self._panel_notes(draw, (x0, y, x0 + half, y + row_h), snap.notes)
+        self._panel_todo(draw, (x0 + half + GAP, y, x1, y + row_h), snap.todos)
+        y += row_h + GAP
 
-        # 底部图标栏（固定高度、贴底），先确定其顶边
-        bottom_h = 110
-        bottom_top = self.h - MARGIN - bottom_h
+        status_top = self.h - MARGIN
 
-        # 第四行：Todo + Token
-        # 高度由「剩余垂直空间」推导：bottom_top - GAP - 当前 y，
-        # 保证整张看板始终落在 1448 画布内、且不与底部图标栏重叠。
-        row4_h = max(220, bottom_top - GAP - y)
-        self._panel_todo(draw, (x0, y, mid, y + row4_h), snap.todos)
-        self._panel_tokens(draw, (mid + GAP, y, x1, y + row4_h), snap.tokens)
-
-        # 底部图标栏
-        self._bottom_bar(draw, (x0, bottom_top, x1, self.h - MARGIN),
-                         snap.bottom_icons)
+        # DeepSeek 整行，吃满剩余高度
+        ds_h = status_top - GAP - y
+        self._panel_deepseek(draw, (x0, y, x1, y + ds_h), snap.deepseek, img)
 
         return self._quantize(img)
 

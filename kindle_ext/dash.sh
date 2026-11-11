@@ -1,4 +1,5 @@
 #!/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # Kindle 看板主循环 ——「不停 framework + 保守重绘 + PC 自动发现」方案
 # 思路：framework 始终运行（保留原生界面 / KUAL / 触屏 / 看其他书的能力），
 #       每 REPAINT_INTERVAL 秒把缓存帧 eips 局部重绘一次压住原生主页重绘，
@@ -37,6 +38,9 @@ fi
 [ -n "${INTERVAL:-}" ] && DAY_INTERVAL=$INTERVAL
 
 # ---- 前光 ----
+# 默认不动亮度：由 Kindle 自己的设置控制（手动调的亮度会被系统记住）。
+# 想让脚本接管亮度，就在 server.conf 里写 APPLY_FL=1，并配合 DEF_FL。
+APPLY_FL=${APPLY_FL:-0}
 FL=$DEF_FL
 [ -f "$FL_CFG" ] && FL=$(cat "$FL_CFG" 2>/dev/null)
 case "$FL" in ''|*[!0-9]*) FL=$DEF_FL ;; esac
@@ -49,6 +53,10 @@ apply_fl() {
 
 log() {
   echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG"
+  # 简单轮转：超过 256KB 只保留后 800 行
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    tail -n 800 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+  fi
 }
 
 [ -z "$TOKEN" ] && { log "ERROR: server.conf 未配置 TOKEN"; exit 1; }
@@ -162,23 +170,31 @@ N=0
 case "$N" in ''|*[!0-9]*) N=0 ;; esac
 
 # ---- 启动：仅防息屏 + 应用前光（不停 framework）----
+echo $$ > "$CFG_DIR/dash.pid"
 lipc-set-prop com.lab126.powerd preventScreenSaver 1 2>&1
-apply_fl
+if [ "$APPLY_FL" = "1" ]; then
+  apply_fl
+  log "前光已设为 $FL / 24"
+else
+  log "前光保持系统当前值（APPLY_FL=0）"
+fi
 report_battery
-log "看板主循环启动(不停 framework) PC=$PC_HOST PORT=$PORT FL=$FL"
+log "看板主循环启动(不停 framework) PC=$PC_HOST PORT=$PORT"
 
 last_fetch=0
+last_min=""
 fail_cnt=0
 while true; do
   # 停止检查（最多延迟一个重绘周期生效）
   if [ -f "$STOP" ]; then
     log "检测到 stop 标志，退出主循环（framework 未停，原生界面保留）"
     rm -f "$STOP"
+    rm -f "$CFG_DIR/dash.pid"
     lipc-set-prop com.lab126.powerd preventScreenSaver 0 2>&1
+    log "已退出，清屏恢复原生界面"
+    eips -c 2>/dev/null || true
     exit 0
   fi
-
-  sleep "$REPAINT_INTERVAL"
 
   # 夜间放慢拉图间隔（重绘仍按 REPAINT_INTERVAL，屏常显压原生 UI）
   hr=$(date +%H)
@@ -189,9 +205,16 @@ while true; do
   fi
 
   now=$(date +%s)
+  cur_min=$(date +%H%M)     # 只在分钟跳变时拉图，保证屏上的"分"与电脑一致
   do_fetch=0
-  if [ "$last_fetch" -eq 0 ] || [ $((now - last_fetch)) -ge "$eff_interval" ]; then
+  if [ "$last_fetch" -eq 0 ]; then
     do_fetch=1
+  elif [ "$cur_min" != "$last_min" ]; then
+    # 分钟一跳就拉：间隔 <=60s 时不看"距上次多久"，否则会被上一次的余量顶到 :30 才拉，
+    # 屏上又会差出半分钟。只有夜间放大间隔时才需要额外判断。
+    if [ "$eff_interval" -le 60 ] || [ $((now - last_fetch)) -ge $((eff_interval - 60)) ]; then
+      do_fetch=1
+    fi
   fi
 
   if [ "$do_fetch" -eq 1 ]; then
@@ -208,6 +231,7 @@ while true; do
         log "draw partial (#$N)"
       fi
       last_fetch=$now
+      last_min=$cur_min
     else
       log "WARN: 取图失败，重绘缓存帧"
       paint_light
@@ -227,4 +251,11 @@ while true; do
     # 未到拉图时机：仅重绘缓存帧压住原生 UI 重绘
     paint_light
   fi
+
+  # 睡到墙钟上的下一个 REPAINT_INTERVAL 刻度（如 :00/:15/:30/:45）。
+  # 用固定 sleep 会累积漂移，一天下来能偏出十几秒，屏上的分钟就跟着乱。
+  now2=$(date +%s)
+  next=$(( (now2 / REPAINT_INTERVAL + 1) * REPAINT_INTERVAL ))
+  gap=$(( next - now2 ))
+  [ "$gap" -gt 0 ] && sleep "$gap"
 done

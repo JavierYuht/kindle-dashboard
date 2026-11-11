@@ -352,6 +352,39 @@ def build(out_path: str = DEFAULT_OUT, force_journal: bool = False,
     except Exception as e:
         print(f"[用量] 采集失败，沿用演示数据：{e}", file=sys.stderr)
 
+    # Apex Dashboard（Obsidian）：未完成待办 → O-04，备忘录 → N-02
+    try:
+        from collectors import apex_dashboard
+        apex = apex_dashboard.load()
+        if apex.available:
+            if apex.todos:
+                snap.todos = [Todo(title=t.title, due_text=t.due_text,
+                                   priority=t.priority, overdue=t.overdue)
+                              for t in apex.todos]
+            if apex.notes:
+                snap.notes = apex.notes
+            snap.todo_done = apex.done
+            print(f"[Apex] 待办 {len(apex.todos)} 条（已完成 {apex.done}）"
+                  f" | 备忘 {len(apex.notes)} 条")
+        else:
+            print(f"[Apex] {apex.note}")
+    except Exception as e:
+        print(f"[Apex] 采集失败：{e}", file=sys.stderr)
+
+    # DeepSeek 用量：读小鲸鱼账本（不联网、不读密钥），余额/token 都由挂件侧记账
+    try:
+        from collectors import whale_usage
+        snap.deepseek = whale_usage.load()
+        d = snap.deepseek
+        if d.available:
+            print(f"[DeepSeek] 余额 ¥{d.balance:.2f} | 今日 ¥{d.today_cost:.2f} | "
+                  f"Token {whale_usage.human_tokens(d.today_tokens)}"
+                  + ("  (数据偏旧)" if d.stale else ""))
+        else:
+            print(f"[DeepSeek] 不可用：{d.note}")
+    except Exception as e:
+        print(f"[DeepSeek] 采集失败：{e}", file=sys.stderr)
+
     r.save(snap, out_path)
     print(f"[渲染] 已生成 {out_path}")
     return out_path

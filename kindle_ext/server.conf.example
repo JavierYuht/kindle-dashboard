@@ -18,4 +18,4 @@ NIGHT_INTERVAL=3600      # 夜间刷新间隔（秒），1 小时
 NIGHT_START=1            # 夜间开始小时（含）
 NIGHT_END=6              # 夜间结束小时（不含）
 FULL_REFRESH_RATE=5      # 每 N 次局部刷新做一次全刷（防残影）
-DEF_FL=24                # 前光强度 0-24
+DEF_FL=10                # 前光强度 0-24（PW3 无环境光传感器，只能手调）

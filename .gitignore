@@ -22,3 +22,10 @@ USB连接诊断与修复.md
 __pycache__/
 *.pyc
 .env
+
+# ===== 本 fork 新增 =====
+# 第三方安装包（微信读书插件等），不入库
+vendor/
+# 鲸鱼娘立绘由 tools/make_mascot.py 本地生成，不随仓库分发
+assets/whale/
+docs/*.tmp

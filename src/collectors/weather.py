@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -119,10 +120,29 @@ class QWeatherClient:
 
     @classmethod
     def from_config(cls, path: Optional[Path] = None) -> "QWeatherClient":
-        cfg = json.loads((path or CONFIG_PATH).read_text(encoding="utf-8"))
+        """环境变量优先，其次 config/weather.json；两者都没有则抛 QWeatherError，
+        让上层按“天气不可用”降级，而不是直接崩掉整张看板。"""
+        cfg = {}
+        p = path or CONFIG_PATH
+        if p.exists():
+            try:
+                cfg = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cfg = {}
+
+        host = (os.environ.get("QWEATHER_API_HOST") or cfg.get("api_host") or "").strip()
+        key = (os.environ.get("QWEATHER_API_KEY") or cfg.get("api_key") or "").strip()
+        # 容错：允许粘贴带 https:// 或结尾斜杠的地址
+        host = host.replace("https://", "").replace("http://", "").strip("/")
+        if not host or not key or "YOUR_" in host:
+            raise QWeatherError(
+                "未配置和风天气（需要 QWEATHER_API_HOST + QWEATHER_API_KEY，"
+                "Host 形如 xxxx.re.qweatherapi.com）"
+            )
+
         return cls(
-            api_host=cfg["api_host"],
-            api_key=cfg["api_key"],
+            api_host=host,
+            api_key=key,
             location_id=cfg.get("location_id") or cfg.get("legacy_location_id", "101020400"),
             location_name=cfg.get("location_name", "上海黄浦区"),
             lang=cfg.get("lang", "zh"),
@@ -193,16 +213,18 @@ class QWeatherClient:
             observed_at=now.obs_time,
         )
 
-        # 24h 面板展示 6 个采样点（每 4 小时一个，覆盖全天）
-        n = len(hourly)
-        sample_idx = [i * (n // 6) for i in range(6)] if n >= 6 else list(range(n))
+        # 面板标题是 NEXT 6H：取「当前小时起」连续 6 个小时，
+        # 而不是把 24 小时摊成 6 个点（那样第一格可能是过去的时刻、间隔 4 小时）。
+        cur = now.obs_time.replace(minute=0, second=0, microsecond=0)
+        start = next((i for i, h in enumerate(hourly) if h.time >= cur), 0)
+        picked = hourly[start:start + 6] or hourly[:6]
         hourly_out = [
             HourlyWeather(
-                hour=hourly[i].time.strftime("%H:00"),
-                temp=hourly[i].temp,
-                icon_code=hourly[i].icon_code,
+                hour=h.time.strftime("%H:00"),
+                temp=h.temp,
+                icon_code=h.icon_code,
             )
-            for i in sample_idx if i < n
+            for h in picked
         ]
         return weather, hourly_out
 

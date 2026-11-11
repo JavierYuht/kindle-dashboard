@@ -1,185 +1,194 @@
-# Kindle Dashboard
+# Kindle Dashboard · Paperwhite 3 改造版
 
-把 Kindle 变成一块安静的墨水屏信息看板：PC 端渲染 1072×1448 16 级灰 PNG，Kindle 端通过 Wi-Fi `curl` 拉图并用 `eips` 上屏。不停原生 `framework`，靠 15 秒保守重绘压住主页，同时保留 KUAL、触屏和正常阅读功能。
+把一台吃灰的 Kindle 变成桌面信息屏：**天气 / 时间 / Kindle 电量 / Obsidian 笔记与待办 / DeepSeek 余额与用量**，全部压在一张 1072×1448 的 16 级灰 PNG 上，每整分钟刷新一次。
 
-![预览](samples/preview_example.png)
+> Fork 自 [xyc1994/kindle-dashboard](https://github.com/xyc1994/kindle-dashboard)（MIT）。
+> 原版是 Windows + KUAL 方案；本 fork 做了 **macOS 化、日系视觉重做、DeepSeek 用量面板**，并把整条链路在真机（PW3 / 5.15.1.1）上跑通。
 
-## 特性
+![看板截图](docs/screenshot.png)
 
-- **8 面板布局**：位置天气、最近更新、Kindle 电量、24H 天气扫描、今日日程、笔记、待办队列、AI 用量（Codex / MiniMax）。
-- **自动发现 PC IP**：Kindle 端启动时扫本机网段，按 token 校验找到正确 PC，换 Wi-Fi 无需手动改 IP。
-- **电量上报**：Kindle 把电池/充电状态回传到 PC，`SYS STATUS` 面板显示真实剩余电量。
-- **用量面板**：Codex 用本地 SQLite 日志 + `codex app-server` 读取 5 小时窗口剩余额度；MiniMax 用 `mmx quota show`。
-- **不停止 framework**：采用 [kindle-side-card](https://github.com/perduewu-ops/kindle-side-card) 思路，15 秒重绘一次缓存帧，KUAL 和触屏都可用。
-- **断网自愈**：连续取图失败 3 次后自动重扫 PC IP。
+---
 
-## 目录结构
+## 它怎么工作
+
+PC 负责渲染，Kindle 只负责"拉图 + 上屏"：
 
 ```
-kindle-dashboard/
-├── src/                 # PC 端：渲染器、看板生成器、HTTP 服务、采集器
-│   ├── dashboard_renderer.py   # 1072×1448 16 级灰 PNG 渲染
-│   ├── build_dashboard.py      # 聚合数据并触发渲染
-│   ├── dash_server.py          # HTTP 服务：/dash.png /report /health
-│   └── collectors/             # 天气、用量、日记笔记等数据源
-├── tools/               # PC 辅助脚本
-│   ├── kindle_ext_builder.py   # 生成 KUAL 扩展并部署到 Kindle
-│   └── start_dash_server.bat   # Windows 开机自启脚本
-├── kindle_ext/          # Kindle 端主循环
-│   ├── dash.sh                 # 拉图 + 上屏 + 电量上报（15 秒重绘）
-│   ├── server.conf.example     # 部署到 Kindle 的 server.conf 模板
-│   └── 换wifi维护指南.md       # 只给 agent 看的维护备忘
-├── config/              # 配置文件（示例已入库，真实文件被 .gitignore）
-│   ├── weather.example.json    # 和风天气配置示例
-│   ├── minimax.json            # MiniMax CLI 调用配置（无 API key）
-│   └── config.example.yaml     # 环境变量占位配置
-├── samples/             # 脱敏示例渲染图
-├── LocationList/        # 公开 POI 数据（非敏感）
-└── QWeather-Icons-1.8.0/  # 第三方图标库，保留原 LICENSE
+        Mac                                          Kindle
+┌────────────────────────┐                  ┌──────────────────────────┐
+│ dash_server.py :8765   │◀── HTTP GET ─────│ curl /dash.png?t=<token> │
+│   └ build_dashboard.py │                  │   └ eips -g → framebuffer│
+│       ├ 天气 (QWeather)│─── 1072×1448 ───▶│                          │
+│       ├ Obsidian 笔记  │      灰度 PNG      │ 每 15s 重绘同一帧（保屏）│
+│       └ DeepSeek 账本  │                  │ 每次拉图回传一次电量      │
+└────────────────────────┘                  └──────────────────────────┘
 ```
 
-## ⚠️ 安全须知（必读）
+- **PC 每次被请求都重新渲染**，所以屏上的时间、余额永远是新的
+- Kindle **不停 framework**，靠每 15 秒把缓存的帧再刷一遍压住原生界面 —— 触屏、原生阅读器随时可用
+- 刷新**对齐整分钟**：分钟一跳就拉新图，屏上的"分"和电脑一致（误差 1–2 秒）
 
-1. **Token**：`dash_server.py` 会自动在 `~/.dash_server/token` 生成 43 字符随机串。不要复制仓库里的任何 token 示例，每个部署应独立生成。
-2. **和风天气 key**：`weather.py` 优先读取环境变量 `QWEATHER_API_HOST` / `QWEATHER_API_KEY`，缺失时回退 `config/weather.json`（该文件已被 `.gitignore` 忽略，不会入库）。
-   ```powershell
-   $env:QWEATHER_API_HOST="你的和风 API Host"
-   $env:QWEATHER_API_KEY="你的和风 Private Key"
-   ```
-3. **MiniMax / Codex**：分别依赖本机已登录的 `mmx` CLI 和 `codex` CLI，代码里不存 API key。
-4. **Kindle 端 `server.conf`**：部署时由 `kindle_ext_builder.py` 从 PC 的 `~/.dash_server/token` 自动填入，不要手写仓库里的示例 token。
+---
 
-## 依赖
+## 与上游的差异
 
-- Windows / macOS / Linux（PC 端，Kindle 端是 Linux Shell）
-- Python 3.10+
-- Pillow（渲染 PNG）
-- 和风天气账号（免费订阅即可，用于天气面板）
-- Kindle 已越狱 + KUAL（Kindle Unified Application Launcher）
-- PC 与 Kindle 在同一 Wi-Fi 下
+| 维度 | 上游 xyc1994/kindle-dashboard | 本 fork |
+|---|---|---|
+| 部署平台 | Windows 盘符（`--drive F:`） | **macOS / POSIX**（`tools/deploy_kindle_macos.py`） |
+| 启动方式 | KUAL 扩展 + menu.json | **Scriptlet**（`.sh` 放 `documents/`，书库里直接点） |
+| 保屏策略 | 15 秒重绘缓存帧 | 相同，另修了上游 `start.sh` 里误停 framework 的坑 |
+| 视觉 | 工业 HUD（编号 L-01、切角、斜纹） | **日系圆角卡片**：2px 浅灰描边、大留白、三档灰 |
+| 时间面板 | "最近更新"时刻（含秒） | **当前时间 HH:MM**，整分钟对齐 |
+| 天气 | 市级 location | **区级**（如浦东新区）+ 真正的"未来 6 小时" |
+| 笔记 / 待办 | `05_Memos` + `01_Daily` + `#kindle` | **Obsidian Apex Dashboard** 的 `dashboard.md` |
+| 用量面板 | Codex / MiniMax 配额 | **DeepSeek 余额 + 今日已用 + 今日 Token + 近 7 日** |
+| 自动重建 | 进程内 `import`（改代码不生效） | **子进程重建**，改完下一张图就生效 |
+| 中文字体 | 只认 Windows 微软雅黑 | 增加 macOS 冬青黑体 / 宋体回退 |
+| 亮度 | 启动强制设 24（最亮） | 默认**不接管**，用 Kindle 自己的设置 |
 
-Python 依赖：
+---
 
-```bash
-pip install -r requirements.txt
-```
+## 硬件与系统前提
+
+- **Kindle Paperwhite 3**（2015，4GB，1072×1448 / 300ppi）
+- 固件 **5.15.1.1**，越狱用 **WinterBreak2**（`jb.sh v2.6.0`）
+- 越狱后自带 KPM + 通用 hotfix，`documents/` 里的 `.sh` 会被索引成"书"（Scriptlet）
+- **不需要 KUAL** —— 这也是本 fork 改走 Scriptlet 的原因
+- PC 端：macOS / Linux / Windows 均可，Python 3.10+、Pillow
+
+> 越狱有风险，请先备份 `documents/`。不要在越狱完成后恢复出厂设置或升级固件。
+
+---
 
 ## 快速开始
 
-### 1. PC 端启动服务
+### 1. PC 端
 
-```powershell
-# PowerShell 推荐：先配天气 env
-$env:QWEATHER_API_HOST="hwxxxxx.re.qweatherapi.com"
-$env:QWEATHER_API_KEY="你的 Private Key"
+```bash
+git clone <this-repo> kindle-dashboard && cd kindle-dashboard
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt        # 只有 Pillow
 
-# 启动服务（--auto-build 表示每次拉图都会自动重建最新看板）
+# 和风天气：控制台「我的项目 → 调用地址」里的专属 Host
+export QWEATHER_API_HOST=xxxxxxxxxx.re.qweatherapi.com
+export QWEATHER_API_KEY=你的Key
+
 python src/dash_server.py --image samples/preview_home.png --port 8765 --auto-build
 ```
 
-首次启动会生成 `~/.dash_server/token`，并在控制台打印 URL：
+首次启动会生成访问 token：`~/.dash_server/token`，并把 URL 打在终端里。
 
+也可以把配置写进 `config/weather.json`（已被 `.gitignore` 忽略）：
+
+```json
+{
+  "api_host": "xxxxxxxxxx.re.qweatherapi.com",
+  "api_key": "你的Key",
+  "location_id": "101020600",
+  "location_name": "上海 · 浦东新区"
+}
 ```
-http://<本机IP>:8765/dash.png?t=<自动生成 token>
-```
 
-### 2. Windows 开机自启
+### 2. Kindle 端
 
-把 `tools/start_dash_server.bat` 放进启动文件夹：
-
-1. `Win + R` → 输入 `shell:startup` → 回车
-2. 复制 `tools/start_dash_server.bat` 进去
-
-> 注意：这个 bat 使用本仓库路径；如果你把项目放到其他位置，需要修改 bat 中的路径。
-
-### 3. Kindle 端部署
-
-#### 方式 A：用 kindle_ext_builder.py 一键部署
-
-USB 连 Kindle，确认出现为 `E:` / `F:` 等可移动磁盘：
+USB 连上 Kindle，确认挂载到 `/Volumes/Kindle`：
 
 ```bash
-python tools/kindle_ext_builder.py --drive F:
+python tools/deploy_kindle_macos.py --host 192.168.1.50
 ```
 
-脚本会：
-- 把 `kindle_ext/dash.sh` 写入 `/mnt/us/extensions/kdashboard/dash.sh`
-- 生成 `/mnt/us/dashboard/server.conf`（自动填入 TOKEN，HOST 可自动发现也可手填）
+会写入：
 
-#### 方式 B：手动复制
-
-1. 把 `kindle_ext/dash.sh` 复制到 Kindle 的 `/mnt/us/extensions/kdashboard/dash.sh`
-2. 把 `kindle_ext/server.conf.example` 复制到 `/mnt/us/dashboard/server.conf`
-3. 修改 `server.conf` 中的 `HOST` 为 PC 当前内网 IP，`TOKEN` 为 `~/.dash_server/token` 的内容
-
-### 4. Kindle 上启动
-
-KUAL → **8. 启动看板主循环**。约 10~20 秒后屏上出现看板。
-
-启动后 Kindle 端会向 PC 的 `/report` 端点上报电量，`SYS STATUS` 面板会显示真实剩余电量。
-
-### 5. 退出看板
-
-USB 连 PC，在 Kindle 盘的 `dashboard/` 目录新建一个空文件 `stop`（无扩展名），再安全弹出拔线。看板下次刷新（≤60 秒）检测到 `stop` 后退出并恢复原生界面；或长按电源键 7 秒硬重启。
-
-## 自动发现 PC IP
-
-`dash.sh` 解析 PC 地址的优先级：
-
-1. 缓存 `dashboard/pc_ip`（上次成功连接的 IP）
-2. `server.conf` 的 `HOST`
-3. 扫描本机网段（CIDR /24），对每个开放 8765 的主机用 `/report?t=TOKEN` 做 token 校验
-
-因此：
-- 日常拉图走缓存/HOST，**不扫网段**。
-- 只有启动时或连续取图失败 3 次才会扫描。
-- 换 Wi-Fi 后，重启 Kindle 看板即可自动找到新 IP，无需再手动改 `server.conf`。
-
-## 配置天气
-
-和风天气配置推荐用环境变量（不将 key 写入任何会被 git 跟踪的文件）：
-
-```powershell
-# PowerShell
-$env:QWEATHER_API_HOST="你的 API Host"
-$env:QWEATHER_API_KEY="你的 Private Key"
-
-# 临时生效，仅当前终端
-# 永久生效：系统设置 → 环境变量 → 新建用户变量
+```
+/mnt/us/dashboard/{dash.sh,start.sh,stop.sh,diag.sh,server.conf}
+/mnt/us/documents/{看板-启动.sh,看板-停止.sh,看板-诊断.sh}
 ```
 
-如果想用文件，复制 `config/weather.example.json` → `config/weather.json`（`weather.json` 已被 `.gitignore` 忽略），填入真实 key。注意：`weather.json` 不要提交到 git。
+拔线后书库里点 **「看板 启动」**，10–20 秒出图。点「看板 停止」恢复原生界面。
 
-## 耗电说明
+### 3. 鲸鱼娘立绘（可选）
 
-本方案**不停 framework 也不休眠**，Kindle 会保持唤醒并每 15 秒重绘一次缓存帧。带来的副作用：
+立绘来自 DSH 的小鲸鱼挂件，**不随仓库分发**。本地装了插件后自行生成：
 
-- KUAL、触屏、阅读器都可用，原生 UI 不会压在看板上。
-- 耗电显著高于“停 framework + RTC 唤醒”方案。Paperwhite 3/4 大概需要每 0.5~1 天充一次电。
+```bash
+python tools/make_mascot.py     # 裁边 → 灰化 → 16 级 Floyd–Steinberg 抖动
+```
 
-如果你不需要保留触屏，可以参考早期版本改用“停 framework + 长间隔唤醒”的省电方案（本仓库 README 历史版本中有）。
+没生成时 DeepSeek 面板会退化成纯数字，不会报错。
 
-## 常见问题
+---
 
-**Q：屏上只显示一部分 / 书架和看板叠在一起？**  
-A：确认 `dash.sh` 是最新版（停 framework 的误用已被修正为 15 秒重绘）。KUAL 重新启动看板。
+## 配置项（`dashboard/server.conf`）
 
-**Q：换 Wi-Fi 后 Kindle 拉不到图？**  
-A：PC 端服务必须重启或保持运行；Kindle 端看板重启会自动扫到新 IP。如果仍失败，检查 PC 防火墙是否放行 8765 端口。
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `HOST` / `PORT` | 自动探测 / 8765 | PC 地址；留空则靠网段扫描自动发现 |
+| `TOKEN` | 部署时自动填 | 与 `~/.dash_server/token` 一致 |
+| `DAY_INTERVAL` | `60` | 白天拉图间隔（秒） |
+| `NIGHT_INTERVAL` | `60` | 夜间间隔；**调大会让屏上时钟停在该间隔上** |
+| `NIGHT_START` / `NIGHT_END` | `1` / `6` | 夜间时段（小时） |
+| `FULL_REFRESH_RATE` | `5` | 每 N 次拉图做一次全刷防残影 |
+| `APPLY_FL` | `0` | 是否由脚本接管前光；默认用 Kindle 自身设置 |
+| `DEF_FL` | `10` | `APPLY_FL=1` 时生效，0–24 |
 
-**Q：电量面板显示“待上报电量”？**  
-A：Kindle 刚启动时尚未上报，等一个 `DAY_INTERVAL`（默认 60 秒）后就会刷新。或确认 `server.conf` 的 `TOKEN` 与 PC 端一致。
+改完点「看板 停止」→「看板 启动」生效。
 
-**Q：和风天气 key 报错？**  
-A：设置环境变量 `QWEATHER_API_HOST` / `QWEATHER_API_KEY`，或确保 `config/weather.json` 存在且 key 有效。
+---
 
-## License
+## 数据来源
 
-MIT License —— 见 [LICENSE](LICENSE) 文件。
+| 面板 | 来源 | 备注 |
+|---|---|---|
+| 天气 | 和风天气 v7 API | 需要专属 API Host；区级 location id |
+| 笔记 / 待办 | `~/Obsidian/<vault>/dashboard.md` | Apex Dashboard 的卡片；可用 `APEX_DASHBOARD_PATH` 覆盖 |
+| DeepSeek | `~/.dsh/.dshw-usage.json` | 小鲸鱼挂件的本地账本，**不读密钥、不联网** |
+| Kindle 电量 | `POST/GET /report?t=&b=&c=` | Kindle 每次拉图后回传 |
 
-本仓库内置的 `QWeather-Icons-1.8.0` 为第三方图标库，保留其原有 LICENSE 与版权声明。
+笔记只显示**最新的一张备忘卡**（按卡片标题里的日期排序）；待办显示全部未完成项、按卡片从新到旧。
+
+---
+
+## Mac 端常驻
+
+```bash
+cp tools/local.kindle-dashboard.plist ~/Library/LaunchAgents/   # 见 docs/ 或自行创建
+launchctl load ~/Library/LaunchAgents/local.kindle-dashboard.plist
+```
+
+`RunAtLoad` + `KeepAlive`：登录后自动启动、崩溃自动拉起。注意 LaunchAgent 是**用户级**，Mac 重启后需要登录一次；要开机即跑得装成 LaunchDaemon。
+
+---
+
+## 已知限制
+
+- **触摸会穿透**：图只是 framebuffer 上的像素，点屏幕等于点下面那层原生 UI。想彻底点不动只能停 framework。
+- **耗电**：15 秒重绘 + 60 秒拉图，PW3 大约 0.5–1 天一充。夜间放慢可以省，但时钟会跟着停。
+- **LaunchAgent 需登录**：断电重启后没人登录，服务不会自己起来。
+- **立绘版权**：鲸鱼娘来自第三方插件，仓库不包含图片，请自行生成并遵守原项目许可。
+
+---
+
+## 本次改造记录（2026-11-11）
+
+1. **越狱与基础环境**：PW3 / 5.15.1.1 → WinterBreak2，确认 `JAILBROKEN.txt`、KPM、KOReader 2026.07.1 与微信读书插件就位
+2. **macOS 化**：上游 Windows 盘符逻辑改为 POSIX 部署脚本；`launchd` 常驻；`run_server.sh` 自动挑选带 Pillow 的解释器
+3. **视觉三轮迭代**：HUD 直角 → 工业切角 → 最终**日系圆角卡片**（2px 浅灰描边、三档灰、大留白）
+4. **刷新修正**：从"固定 sleep 60"改为"整分钟对齐 + 墙钟刻度睡眠"，消除累积漂移与相位滞后
+5. **时区细节**：去掉秒、夜间不再冻结时钟、`NIGHT_INTERVAL` 默认改 60
+6. **新增面板**：DeepSeek 余额 / 今日已用 / 今日 Token / 近 7 日（读小鲸鱼账本）；鲸鱼娘立绘做灰度抖动
+7. **Obsidian 接入**：解析 Apex Dashboard 的 `dashboard.md`，笔记取最新一张卡、待办按卡片新旧排序
+8. **一堆排版 bug**：笔记一条一个圆点、待办长条目压 footer、天气图标溢出、英文按词换行、`服务器缓存模块导致改代码不生效`
+
+---
 
 ## 致谢
 
-- 上屏方案参考 [kindle-side-card](https://github.com/perduewu-ops/kindle-side-card) 的保守重绘循环。
-- 和风天气提供公开天气 API。
+- 上游项目：[xyc1994/kindle-dashboard](https://github.com/xyc1994/kindle-dashboard)，上屏方案参考 [kindle-side-card](https://github.com/perduewu-ops/kindle-side-card)
+- 越狱与生态：[KindleModding Wiki](https://kindlemodding.org/)、WinterBreak2
+- 天气：[和风天气](https://www.qweather.com/)
+- 图标：[QWeather-Icons](https://github.com/qwd/Icons)（保留原 LICENSE）
+- 微信读书插件：[finlater/weread.koplugin](https://github.com/finlater/weread.koplugin)
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。上游版权归原作者所有。

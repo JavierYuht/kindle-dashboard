@@ -21,6 +21,7 @@ import argparse
 import json
 import mimetypes
 import secrets
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 DEFAULT_PORT = 8765
+BUILD_SCRIPT = Path(__file__).resolve().parent / "build_dashboard.py"
+_BUILD_SCRIPT = BUILD_SCRIPT
 TOKEN_DIR = Path.home() / ".dash_server"
 TOKEN_FILE = TOKEN_DIR / "token"
 # Kindle 端通过 /report 接口上报的电量状态文件（build_dashboard.py 会读它）
@@ -90,11 +93,35 @@ def make_handler(image_path: Path, token: str, auto_build: bool = False,
         def _maybe_rebuild(self):
             """auto-build 模式：每次拉图都重建，保证屏上时间实时刷新。
 
-            天气联网拉取由 build_dashboard 内部的 1 小时缓存节流，
-            日记抽取由 mtime 缓存节流，因此「每次重建」只重渲染 PNG，
-            不会造成频繁联网。
+            用子进程跑 build_dashboard.py，而不是 import 后调用：
+            服务是常驻的，进程内调用的模块会被 Python 缓存，
+            改了渲染代码不重启服务就不会生效（踩过这个坑）。
+            子进程每次都是全新解释器，改完代码下一张图就是新的。
+
+            天气联网由 build_dashboard 内部的 1 小时缓存节流，
+            日记抽取由 mtime 缓存节流，因此「每次重建」只重渲染 PNG。
             """
-            if not auto_build or not _BUILD_AVAILABLE:
+            if not auto_build:
+                return
+
+            if _BUILD_SCRIPT.exists():
+                try:
+                    p = subprocess.run(
+                        [sys.executable, str(_BUILD_SCRIPT), str(image_path)],
+                        cwd=str(_BUILD_SCRIPT.parent.parent),
+                        capture_output=True, text=True, timeout=180)
+                    if p.returncode == 0:
+                        size = image_path.stat().st_size if image_path.exists() else 0
+                        log(f"{self.client_address[0]} auto-rebuilt dashboard ({size} bytes)")
+                    else:
+                        tail = (p.stderr or "").strip().splitlines()[-3:]
+                        log(f"{self.client_address[0]} auto-rebuild failed: {' | '.join(tail)}")
+                    return
+                except Exception as e:
+                    log(f"{self.client_address[0]} auto-rebuild subprocess error: {e}")
+
+            # 兜底：子进程不可用时才走进程内构建
+            if not _BUILD_AVAILABLE:
                 return
             try:
                 _build_dashboard(str(image_path))

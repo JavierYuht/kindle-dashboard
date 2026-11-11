@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 复制到 ~/Library/LaunchAgents/local.kindle-dashboard.plist，
+     把 REPLACE_HOME 换成你的家目录绝对路径（launchd 不展开 $HOME）。
+     launchctl load -w ~/Library/LaunchAgents/local.kindle-dashboard.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.kindle-dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>REPLACE_HOME/kindle-dashboard/tools/run_server.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>REPLACE_HOME/kindle-dashboard</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>REPLACE_HOME/Library/Logs/kindle-dashboard.log</string>
+  <key>StandardErrorPath</key><string>REPLACE_HOME/Library/Logs/kindle-dashboard.err.log</string>
+</dict>
+</plist>
