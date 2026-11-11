@@ -107,7 +107,7 @@ PC 负责渲染，Kindle 只负责"拉图 + 上屏"：
 ### 1. PC 端
 
 ```bash
-git clone <this-repo> kindle-dashboard && cd kindle-dashboard
+git clone git@github.com:JavierYuht/kindle-dashboard.git && cd kindle-dashboard
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt        # 只有 Pillow
 
